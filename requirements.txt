@@ -1,0 +1,10 @@
+streamlit>=1.18
+pandas
+numpy
+matplotlib
+seaborn
+plotly
+scikit-learn
+joblib
+wordcloud
+python-dotenv
