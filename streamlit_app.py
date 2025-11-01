@@ -14,6 +14,7 @@ from unidecode import unidecode
 import emoji
 
 from sklearn.metrics import confusion_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 
 
@@ -149,6 +150,46 @@ def top_ngrams_from_series(series, n=2, topn=20, min_df=2):
     items.sort(key=lambda x: x[1], reverse=True)
     return items[:topn]
 
+@st.cache_data
+def compute_distinctive_words(df_filtered, topn=25):
+    """Calcula palabras distintivas usando TF-IDF"""
+    if len(df_filtered) == 0:
+        return None, None
+    
+    texts_class0 = df_filtered.loc[df_filtered["target"] == 0, "text_clean"].astype(str).tolist()
+    texts_class1 = df_filtered.loc[df_filtered["target"] == 1, "text_clean"].astype(str).tolist()
+    
+    if len(texts_class0) == 0 or len(texts_class1) == 0:
+        return None, None
+    
+    try:
+        vectorizer = TfidfVectorizer(max_features=1000, min_df=2, ngram_range=(1, 1))
+        tfidf_matrix = vectorizer.fit_transform(texts_class0 + texts_class1)
+        feature_names = vectorizer.get_feature_names_out()
+        
+        # Promediar TF-IDF scores para cada clase
+        tfidf_class0 = tfidf_matrix[:len(texts_class0)].mean(axis=0).A1
+        tfidf_class1 = tfidf_matrix[len(texts_class0):].mean(axis=0).A1
+        
+        # Crear DataFrame con scores
+        df_tfidf = pd.DataFrame({
+            'token': feature_names,
+            'tfidf_class0': tfidf_class0,
+            'tfidf_class1': tfidf_class1
+        })
+        
+        # Calcular diferencia (qué tan distintiva es cada palabra)
+        df_tfidf['diff_class1'] = df_tfidf['tfidf_class1'] - df_tfidf['tfidf_class0']
+        df_tfidf['diff_class0'] = df_tfidf['tfidf_class0'] - df_tfidf['tfidf_class1']
+        
+        # Top palabras más distintivas de cada clase
+        top_distinct_class1 = df_tfidf.nlargest(topn, 'diff_class1')[['token', 'diff_class1']]
+        top_distinct_class0 = df_tfidf.nlargest(topn, 'diff_class0')[['token', 'diff_class0']]
+        
+        return top_distinct_class1, top_distinct_class0
+    except Exception as e:
+        return None, None
+
 # -------- load ----------
 df = load_data()
 models = load_models()
@@ -163,18 +204,39 @@ sel_len = st.sidebar.slider("Rango longitud (caracteres)", min_value=min_len, ma
                             value=(min_len, min(280, max_len)))
 topn = st.sidebar.slider("Top N tokens / n-grams", min_value=5, max_value=40, value=20)
 sel_ngram = st.sidebar.selectbox("N-gram", options=["1 (unigram)", "2 (bigram)"], index=0)
+
+# Nuevos filtros: keyword y location
+if df["keyword"].notna().sum() > 0:
+    keywords_list = ["All"] + sorted(df["keyword"].dropna().unique().tolist())
+    sel_keyword = st.sidebar.selectbox("Keyword", options=keywords_list[:100] if len(keywords_list) > 100 else keywords_list)
+else:
+    sel_keyword = "All"
+
+if df["location"].notna().sum() > 0:
+    locations_list = ["All"] + sorted(df["location"].dropna().unique().tolist())
+    sel_location = st.sidebar.selectbox("Location", options=locations_list[:100] if len(locations_list) > 100 else locations_list)
+else:
+    sel_location = "All"
+
 sel_models = st.sidebar.multiselect("Modelos a mostrar (matrices/métricas)", options=list(models.keys()),
                                     default=list(models.keys()))
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("Descargas")
-if st.sidebar.button("Exportar CSV (filtrado)"):
-    dff = df.copy()
+# Esta función se ejecutará cuando el usuario haga clic en el botón
+def get_filtered_csv():
+    dff_export = df.copy()
     if sel_class != "All":
-        dff = dff[dff["target"] == int(sel_class.split()[0])]
-    dff = dff[(dff["text_char_len"] >= sel_len[0]) & (dff["text_char_len"] <= sel_len[1])]
-    st.sidebar.download_button("Descargar CSV filtrado", dff.to_csv(index=False).encode("utf-8"),
-                               file_name="filtered_tweets.csv")
+        dff_export = dff_export[dff_export["target"] == int(sel_class.split()[0])]
+    dff_export = dff_export[(dff_export["text_char_len"] >= sel_len[0]) & (dff_export["text_char_len"] <= sel_len[1])]
+    if sel_keyword != "All":
+        dff_export = dff_export[dff_export["keyword"] == sel_keyword]
+    if sel_location != "All":
+        dff_export = dff_export[dff_export["location"] == sel_location]
+    return dff_export.to_csv(index=False).encode("utf-8")
+
+st.sidebar.download_button("Descargar CSV filtrado", get_filtered_csv(),
+                           file_name="filtered_tweets.csv", mime="text/csv")
 
 # -------- layout header --------
 st.title("Voces en crisis — Dashboard")
@@ -185,6 +247,34 @@ dff = df.copy()
 if sel_class != "All":
     dff = dff[dff["target"] == int(sel_class.split()[0])]
 dff = dff[(dff["text_char_len"] >= sel_len[0]) & (dff["text_char_len"] <= sel_len[1])]
+if sel_keyword != "All":
+    dff = dff[dff["keyword"] == sel_keyword]
+if sel_location != "All":
+    dff = dff[dff["location"] == sel_location]
+
+# Estadísticas resumen del dataset filtrado
+st.markdown("### Estadísticas del Dataset Filtrado")
+col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+with col_stat1:
+    st.metric("Total tweets", f"{len(dff):,}")
+with col_stat2:
+    if len(dff) > 0:
+        pct_cls1 = (dff["target"] == 1).sum() / len(dff) * 100
+        st.metric("Desastre (1)", f"{(dff['target']==1).sum():,} ({pct_cls1:.1f}%)")
+    else:
+        st.metric("Desastre (1)", "0")
+with col_stat3:
+    if len(dff) > 0:
+        avg_len = dff["text_char_len"].mean()
+        st.metric("Longitud promedio", f"{avg_len:.0f} chars")
+    else:
+        st.metric("Longitud promedio", "0")
+with col_stat4:
+    if len(dff) > 0 and dff["keyword"].notna().sum() > 0:
+        pct_kw = dff["keyword"].notna().sum() / len(dff) * 100
+        st.metric("Con keyword", f"{dff['keyword'].notna().sum():,} ({pct_kw:.1f}%)")
+    else:
+        st.metric("Con keyword", "0")
 
 # Row 1: Class distribution + interactive hist
 col1, col2 = st.columns([1,2])
@@ -261,7 +351,52 @@ with col4:
         st.info("WordCloud no instalado. Instálalo con `pip install wordcloud` para ver esta visualización.")
 
 
-# Row 3: Bigrams / Trigrams area (always computed from filtered dff)
+# Row 3: Palabras Distintivas (TF-IDF)
+st.subheader("Palabras Distintivas (Análisis TF-IDF)")
+st.markdown("**Palabras más características de cada clase usando TF-IDF**")
+
+distinct_1, distinct_0 = compute_distinctive_words(dff, topn=topn)
+
+if distinct_1 is not None and distinct_0 is not None:
+    tfidf_col1, tfidf_col2 = st.columns(2)
+    
+    with tfidf_col1:
+        st.markdown("**Top palabras distintivas — Desastre (1)**")
+        distinct_1_reversed = distinct_1.sort_values('diff_class1', ascending=True)
+        fig_tfidf1 = go.Figure(go.Bar(
+            x=distinct_1_reversed['diff_class1'].values,
+            y=distinct_1_reversed['token'].values,
+            orientation='h',
+            marker_color='#e6550d'
+        ))
+        fig_tfidf1.update_layout(
+            height=max(400, len(distinct_1)*20),
+            xaxis_title="Score TF-IDF Distintivo",
+            yaxis_title="",
+            showlegend=False
+        )
+        st.plotly_chart(fig_tfidf1, use_container_width=True)
+    
+    with tfidf_col2:
+        st.markdown("**Top palabras distintivas — No Desastre (0)**")
+        distinct_0_reversed = distinct_0.sort_values('diff_class0', ascending=True)
+        fig_tfidf0 = go.Figure(go.Bar(
+            x=distinct_0_reversed['diff_class0'].values,
+            y=distinct_0_reversed['token'].values,
+            orientation='h',
+            marker_color='#3182bd'
+        ))
+        fig_tfidf0.update_layout(
+            height=max(400, len(distinct_0)*20),
+            xaxis_title="Score TF-IDF Distintivo",
+            yaxis_title="",
+            showlegend=False
+        )
+        st.plotly_chart(fig_tfidf0, use_container_width=True)
+else:
+    st.info("No hay suficientes datos con los filtros actuales para calcular palabras distintivas. Necesitas datos de ambas clases.")
+
+# Row 4: Bigrams / Trigrams area (always computed from filtered dff)
 st.subheader("N-gramas")
 bi = top_ngrams_from_series(dff["text_clean"], n=2, topn=20)
 tri = top_ngrams_from_series(dff["text_clean"], n=3, topn=15)
@@ -284,16 +419,80 @@ with c2:
         st.info("No hay trigramas suficientes.")
         
 
-# Row 4: Ejemplos (tabla) - enlazada con token selection (multi)
+# Row 5: Análisis de Keywords y Locations
+if df["keyword"].notna().sum() > 0 or df["location"].notna().sum() > 0:
+    st.subheader("Análisis de Keywords y Locations")
+    kw_col1, kw_col2 = st.columns(2)
+    
+    with kw_col1:
+        st.markdown("**Top Keywords por Clase (filtrado)**")
+        if len(dff) > 0:
+            # Top keywords para clase 1
+            kw1 = dff.loc[dff["target"]==1, "keyword"].value_counts().head(10)
+            # Top keywords para clase 0
+            kw0 = dff.loc[dff["target"]==0, "keyword"].value_counts().head(10)
+            
+            if len(kw1) > 0 or len(kw0) > 0:
+                kw_fig_data = []
+                if len(kw1) > 0:
+                    for kw, freq in kw1.items():
+                        kw_fig_data.append({"keyword": kw, "freq": freq, "clase": "1 - Desastre"})
+                if len(kw0) > 0:
+                    for kw, freq in kw0.items():
+                        kw_fig_data.append({"keyword": kw, "freq": freq, "clase": "0 - No desastre"})
+                
+                if kw_fig_data:
+                    kw_df = pd.DataFrame(kw_fig_data)
+                    fig_kw = px.bar(kw_df, x="freq", y="keyword", color="clase", orientation="h",
+                                   color_discrete_map={"1 - Desastre": "#e6550d", "0 - No desastre": "#3182bd"})
+                    fig_kw.update_layout(height=max(400, len(kw_df)*25))
+                    st.plotly_chart(fig_kw, use_container_width=True)
+            else:
+                st.info("No hay keywords disponibles con los filtros actuales.")
+        else:
+            st.info("No hay datos con los filtros actuales.")
+    
+    with kw_col2:
+        st.markdown("**Top Locations por Clase (filtrado)**")
+        if len(dff) > 0:
+            # Top locations para clase 1
+            loc1 = dff.loc[dff["target"]==1, "location"].value_counts().head(10)
+            # Top locations para clase 0
+            loc0 = dff.loc[dff["target"]==0, "location"].value_counts().head(10)
+            
+            if len(loc1) > 0 or len(loc0) > 0:
+                loc_fig_data = []
+                if len(loc1) > 0:
+                    for loc, freq in loc1.items():
+                        loc_fig_data.append({"location": loc, "freq": freq, "clase": "1 - Desastre"})
+                if len(loc0) > 0:
+                    for loc, freq in loc0.items():
+                        loc_fig_data.append({"location": loc, "freq": freq, "clase": "0 - No desastre"})
+                
+                if loc_fig_data:
+                    loc_df = pd.DataFrame(loc_fig_data)
+                    fig_loc = px.bar(loc_df, x="freq", y="location", color="clase", orientation="h",
+                                      color_discrete_map={"1 - Desastre": "#e6550d", "0 - No desastre": "#3182bd"})
+                    fig_loc.update_layout(height=max(400, len(loc_df)*25))
+                    st.plotly_chart(fig_loc, use_container_width=True)
+            else:
+                st.info("No hay locations disponibles con los filtros actuales.")
+        else:
+            st.info("No hay datos con los filtros actuales.")
+
+# Row 6: Ejemplos (tabla) - enlazada con token selection (multi)
 st.subheader("Ejemplos de tweets")
-tokens_sel = st.multiselect("Filtrar por tokens", options=list(pd.Series(" ".join(df["text_clean"].astype(str)).split()).value_counts().index[:200]))
+tokens_sel = st.multiselect("Filtrar por tokens", options=list(pd.Series(" ".join(dff["text_clean"].astype(str)).split()).value_counts().index[:200]))
 # aplicar token filter
 display_df = dff.copy()
 if tokens_sel:
     display_df = display_df[display_df["text_clean"].apply(lambda s: all(t in s.split() for t in tokens_sel))]
-st.dataframe(display_df[["id","keyword","location","text","target"]].sample(min(200, len(display_df))), use_container_width=True)
+if len(display_df) > 0:
+    st.dataframe(display_df[["id","keyword","location","text","target"]].sample(min(200, len(display_df))), use_container_width=True)
+else:
+    st.info("No hay tweets que coincidan con los filtros actuales.")
 
-# Row 5: Model comparison (metrics + confusion matrices)
+# Row 7: Model comparison (metrics + confusion matrices)
 st.subheader("Comparación de modelos y matrices de confusión")
 if not metrics_df.empty:
     st.table(metrics_df.loc[sorted(metrics_df.index)].round(3))
@@ -313,7 +512,7 @@ for i, m in enumerate(sel_models):
         else:
             st.info("Matriz no disponible. Ejecuta run_all.py para generarla.")
 
-# Row 6: prediccion rapida con modelo seleccionado
+# Row 8: prediccion rapida con modelo seleccionado
 st.subheader("Probar modelo con texto libre")
 model_choice = st.selectbox("Elegir modelo para predecir", options=list(models.keys()) if models else [])
 text_in = st.text_area("Escribe un tweet de ejemplo aquí", value="Massive fire reported near the highway, people evacuating")
