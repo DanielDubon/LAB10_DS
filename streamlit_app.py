@@ -1,4 +1,5 @@
 
+
 import streamlit as st
 from pathlib import Path
 import pandas as pd
@@ -10,8 +11,26 @@ import plotly.graph_objects as go
 
 import re
 from html import unescape
-from unidecode import unidecode
 import emoji
+import unicodedata 
+try:
+    from unidecode import unidecode
+    UNIDECODE_AVAILABLE = True
+except Exception:
+    UNIDECODE_AVAILABLE = False
+    def unidecode(s: str) -> str:
+        if not isinstance(s, str):
+            return ""
+        return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+
+
+try:
+    from wordcloud import WordCloud, STOPWORDS
+    WC_AVAILABLE = True
+except Exception:
+    WordCloud = None
+    STOPWORDS = set()
+    WC_AVAILABLE = False
 
 from sklearn.metrics import confusion_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer

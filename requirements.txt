@@ -1,10 +1,11 @@
-streamlit>=1.18
+streamlit
 pandas
 numpy
-matplotlib
-seaborn
-plotly
 scikit-learn
+plotly
 joblib
 wordcloud
-python-dotenv
+unidecode
+emoji
+matplotlib
+seaborn
